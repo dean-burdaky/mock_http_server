@@ -158,66 +158,102 @@ def mime_type_map( mime_type_str : str ) -> Dict[ str, Tuple[ str, float ] ]:
   entries = mime_type_str.split( ',' )
 
   for entry in entries:
-    mime_type_1, entry = entry.split( '/' )
-    if '?' in entry:
-      mime_type_2, quality = entry.split( '?' )
+    mime_type_1, entry = entry.split( '/', 1 )
+    if ';' in entry:
+      mime_type_2, entry = entry.split( ';', 1 )
+      if '=' in entry:
+        attribute_strs = entry.split( '=', 1 )
+        attribute = ( attribute_strs[0], literal_eval( attribute_strs[1] ) )
+      else:
+        attribute = entry
     else:
       mime_type_2 = entry
-      quality = 1
+      attribute = None
     if not mime_type_1 in buckets:
       buckets[mime_type_1] = {}
     if not mime_type_2 in buckets[mime_type_1]:
-      buckets[mime_type_1][mime_type_2] = quality
+      buckets[mime_type_1][mime_type_2] = attribute
 
   return buckets
 
 
-def accept_headers_match( handler : Handler, headers : Message ) -> bool:
-  header = "Accept"
-  t_mt_map = mime_type_map( handler["headers"][header] )
-  r_mt_map = mime_type_map( headers[header] )
-  accept_matched = False
+def accept_headers_match( t_accept_header : str, r_accept_header : str ) -> bool:
+  t_mt_map = mime_type_map( t_accept_header )
+  r_mt_map = mime_type_map( r_accept_header )
 
-  # Check */* for template
-  if "*" in t_mt_map["*"] and len( r_mt_map ) > 0:
-    accept_matched = True
-  # Check */* for request
-  elif "*" in r_mt_map["*"] and len( t_mt_map ) > 0:
-    accept_matched = True
-  # Check */<MT2> for template (special behaviour)
-  else:
-    for t_mt2 in t_mt_map["*"]:
-      for r_mt1 in r_mt_map:
-        if t_mt2 in r_mt_map[r_mt1]:
-          accept_matched = True
-          break
-      if accept_matched:
-        break
+  # r_mt_map is empty, so the client hasn't properly defined what it can accept for a response
+  if len( r_mt_map ) <= 0:
+    return False
 
-  # Found somethign with *?
-  if accept_matched:
+  # Template: */* - Handler supports responding in any content type
+  if "*" in t_mt_map and "*" in t_mt_map["*"]:
     return True
-  # No valid maps for */<MT2>, remove it if we have it
-  elif "*" in t_mt_map["*"]:
-    t_mt_map.pop( "*" )
-  
-  # Check <MT1>
-  for t_mt1 in t_mt_map:
-    if t_mt1 in r_mt_map:
-      # Check <MT1>/* for template/request
-      if "*" in t_mt_map[t_mt1] or "*" in r_mt_map[t_mt1]
-        accept_matched = True
-        break
-      # Check <MT1>/<MT2> for template
-      else:
-        for t_mt2 in t_mt_map[t_mt1]:
-          if t_mt2 in r_mt_map[t_mt1]:
-            accept_matched = True
-            break
-    if accept_matched:
-      break
 
-  return accept_matched
+  # Request: */* - Client can accept a response with any content type
+  if "*" in r_mt_map and "*" in r_mt_map["*"]:
+    return True
+
+  # Template: mt1/? - Primary mime type that handler supports
+  for t_mt1 in t_mt_map:
+    # If client can accept the primary mime type
+    if t_mt1 in r_mt_map:
+      # Template: mt1/* - handler supports response in any secondary mime type
+      if "*" in t_mt_map:
+        return True
+
+      # Template: mt1/mt2 - Content type composed of both primary and secondary mime types
+      for t_mt2 in t_mt_map[t_mt1]:
+        # If client can accept the content type
+        if t_mt2 in r_mt_map[t_mt1]:
+          return True
+
+  return False
+
+
+def content_type_headers_match( t_ct_header : str, r_ct_header : str ) -> bool:
+  t_mt_map = mime_type_map( t_ct_header )
+  if '/' in r_ct_header:
+    r_mt1, temp = r_ct_header.split( '/', 1 )
+    if ';' in temp:
+      r_mt2, temp = temp.split( ';', 1 )
+      if '=' in temp:
+        attribute = temp.split( '=', 1 )
+      else:
+        attribute = temp
+    else:
+      attribute = None
+  else:
+    return False
+
+  # */*
+  if "*" in t_mt_map and "*" in t_mt_map["*"]:
+    return True
+
+  # Not mt1/?
+  if not r_mt1 in t_mt_map:
+    return False
+  
+  # mt1/*
+  if "*" in t_mt_map[r_mt1]:
+    return True
+
+  # Not mt1/mt2
+  if not r_mt2 in t_mt_map[r_mt1]:
+    return False
+
+  return True
+
+def match_headers( hander : Handler, request_headers : Message ) -> bool:
+  for header in handler["headers"]:
+    if header in headers:
+      if header.lower() == "accept":
+        if not accept_headers_match( handler["headers"], headers )
+          return False
+      elif header.lower() == "content-type":
+        if not content_type_headers_match( handler["headers"], headers )
+          return False
+
+  return True
 
 
 def find_handler_in_bucket( request_type : str, full_path : str, headers : Message, client : Tuple[ str, int ],
@@ -227,7 +263,7 @@ def find_handler_in_bucket( request_type : str, full_path : str, headers : Messa
 
     if "headers" in handler and matches:
       for header in handler["headers"]:
-        if headers in headers:
+        if header in headers:
           if header == "Accept":
             if not accept_headers_match( handler, header, headers )
               matches = False
