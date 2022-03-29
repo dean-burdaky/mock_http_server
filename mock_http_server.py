@@ -21,7 +21,10 @@ class DelegatingHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
   def do_GET( self ):
     handler = find_handler( "GET", self.path, self.headers, self.client_address )
-    if handler == None:
+    path_vars = None
+    if handler != None:
+      path_vars = find_path_vars( self.path )
+      hander["handle"]()
       self.send_response( http.HTTPStatus.NOT_FOUND )
     self.send_response( http.HTTPStatus.OK )
 
@@ -256,26 +259,29 @@ def match_headers( hander : Handler, request_headers : Message ) -> bool:
   return True
 
 
+def match_queries( hander : Handler, request_queries : Dict[ str, str ] ) -> bool:
+  if len( handler["queries"] ) == len( request_queries ):
+    for param in handler["queries"]:
+      if not param in request_queries or not isinstance( request_queries[param], handler["queries"][param] ):
+        return False
+  else:
+    return False
+
+  return True
+
+
 def find_handler_in_bucket( request_type : str, full_path : str, headers : Message, client : Tuple[ str, int ],
                             queries : Dict[ str, str ], bucket : List[ Handler ] ) -> Handler:
   for handler in bucket:
     matches = handler["request_type"] == request_type
 
     if "headers" in handler and matches:
-      for header in handler["headers"]:
-        if header in headers:
-          if header == "Accept":
-            if not accept_headers_match( handler, header, headers )
-              matches = False
-          # Need to handle Content-Type
+      matches = match_headers( handler, headers )
 
     if matches:
-      if "queries" in handler and len( handler["queries"] ) == len( queries ):
-          for param in handler["queries"]:
-            if not param in queries or not isinstance( queries[param], handler["queries"][param] ):
-              matches = False
-              break
-      elif "queries" in handler or len( queries ) > 0
+      if "queries" in handler:
+        matches = match_queries( handler, queries )
+      elif len( queries ) > 0
         matches = False
     
     if matches:
@@ -330,6 +336,57 @@ def find_handler( request_type : str, path : str, headers : Message, client : Tu
     queries = deserialise_query_str( path_query_split[1] )
   
   return find_handler_at_node( request_type, path, headers, client, queries, path_only, handler_map )
+
+  def find_path_vars( path : str, handler : Handler ) -> Dict[ str, Any ]:
+    r_path = path.split( '?', 1 )[0]
+    t_path = handler["path"]
+    path_vars = []
+
+    left_start = 0
+    left_end = -1
+    left_str = None
+    right_start = 0
+    right_end = -1
+    right_str = None
+    key_start = 0
+    key_end = -1
+    key_str = None
+    value_start = -1
+    value_end = 0
+    value_str = None
+    value = None
+
+    left_end = t_path.find( "$$" )
+    if left_end >= 0:
+      left_str = t_path[left_start:left_end]
+      value_start = r_path.find( left_str ) + len( left_str )
+      value_end = -1
+    while 0 <= left_end and left_end < len( t_path ):
+      key_start = left_end + 2
+      key_end = t_path.find( "$$", key_start )
+      if key_end >= 0:
+        key_str = t_path[key_start:key_end]
+        right_start = key_end + 2
+        right_end = t_path.find( "$$", right_start )
+      if right_end >= 0:
+        right_str = t_path[right_start:right_end]
+        value_end = r_path.find( right_str, value_start )
+        left_start = right_start
+        left_end = right_end
+        left_str = right_str
+      if value_start >= 0 and value_end >= 0:
+        value_str = r_path[value_start:value_end]
+        try:
+          value = literal_eval( value_str )
+        except:
+          return None
+        value_start = value_end + len( right_str )
+      if key_str != None and value != None:
+        path_vars[key_str] = value
+      key_str = None
+      value = None
+
+    return path_vars
 
 
 def server_startup( handler_map : HandlerNode ) -> None:
