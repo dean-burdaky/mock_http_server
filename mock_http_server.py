@@ -5,6 +5,7 @@ import urllib
 
 import os
 import os.path as path
+import argparse
 
 from ast           import literal_eval
 from email.message import Message
@@ -12,6 +13,10 @@ from typing        import Any, Tuple, Dict, List, Union
 
 Handler = Dict[ str, Any ]
 HandlerNode = Dict[ str, Union[ Dict, List[ Handler ] ] ]
+Queries = Dict[ str, str ]
+ResponseCode = int
+ResponseHeaders = Dict[ str, str ]
+EncResponseContent = bytes
 
 universal_encoding = "utf-8"
 
@@ -20,13 +25,19 @@ class DelegatingHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
     self.send_response( http.HTTPStatus.OK )
 
   def do_GET( self ):
-    handler = find_handler( "GET", self.path, self.headers, self.client_address )
+    queries = find_queries( self.path )
+    handler = find_handler( "GET", self.path, queries, self.headers, self.client_address )
     path_vars = None
     if handler != None:
       path_vars = find_path_vars( self.path )
-      hander["handle"]()
-      self.send_response( http.HTTPStatus.NOT_FOUND )
-    self.send_response( http.HTTPStatus.OK )
+      code, headers, content = hander["handle"]( self, self.client_address, queries, path_vars )
+      self.send_response( code )
+      for header_key in headers:
+        self.send_header( header_key, headers[header_key] )
+      self.end_headers()
+      self.wfile.write( content )
+    else:
+      self.send_error( http.HTTPStatus.NOT_FOUND, "Unable to find handler for request", "Unable to find handler which matches with the request in one or more of: Path, queries, headers and path variables." )
 
 
 def find_handler_files() -> List[ str ]:
@@ -156,6 +167,17 @@ def deserialise_query_str( query_str : str ) -> Dict[ str, Any ]:
   return queries
 
 
+def find_queries( path : str ) -> Queries:
+  path_split  = path.split( '?', 1 )
+
+  if len( path_split ) > 1:
+    queries = deserialise_query_str( path_split[1] )
+  else:
+    queries = {}
+
+  return queries
+
+
 def mime_type_map( mime_type_str : str ) -> Dict[ str, Tuple[ str, float ] ]:
   buckets = {}
   entries = mime_type_str.split( ',' )
@@ -259,7 +281,7 @@ def match_headers( hander : Handler, request_headers : Message ) -> bool:
   return True
 
 
-def match_queries( hander : Handler, request_queries : Dict[ str, str ] ) -> bool:
+def match_queries( hander : Handler, request_queries : Queries ) -> bool:
   if len( handler["queries"] ) == len( request_queries ):
     for param in handler["queries"]:
       if not param in request_queries or not isinstance( request_queries[param], handler["queries"][param] ):
@@ -271,7 +293,7 @@ def match_queries( hander : Handler, request_queries : Dict[ str, str ] ) -> boo
 
 
 def find_handler_in_bucket( request_type : str, full_path : str, headers : Message, client : Tuple[ str, int ],
-                            queries : Dict[ str, str ], bucket : List[ Handler ] ) -> Handler:
+                            queries : Queries, bucket : List[ Handler ] ) -> Handler:
   for handler in bucket:
     matches = handler["request_type"] == request_type
 
@@ -291,7 +313,7 @@ def find_handler_in_bucket( request_type : str, full_path : str, headers : Messa
 
 
 def find_handler_at_node( request_type : str, full_path : str, headers : Message, client : Tuple[ str, int ],
-                          queries : Dict[ str, str ], path : str, parent : HandlerNode ) -> Handler:
+                          queries : Queries, path : str, parent : HandlerNode ) -> Handler:
   handler = None
 
   split_path = path.split( '/', 1 )
@@ -329,72 +351,80 @@ def find_handler_at_node( request_type : str, full_path : str, headers : Message
   return handler
 
 
-def find_handler( request_type : str, path : str, headers : Message, client : Tuple[ str, int ] ) -> Handler:
-  path_query_split = path.split( '?', 1 )[0]
-  path_only = path_query_split[0]
-  if len( path_query_split ) > 1:
-    queries = deserialise_query_str( path_query_split[1] )
-  
+def find_handler( request_type : str, path : str, queries : Queries,
+                  headers : Message, client : Tuple[ str, int ] ) -> Handler:
+  global handler_map
+              
+  path_only = path.split( '?', 1 )[0]
+
   return find_handler_at_node( request_type, path, headers, client, queries, path_only, handler_map )
 
-  def find_path_vars( path : str, handler : Handler ) -> Dict[ str, Any ]:
-    r_path = path.split( '?', 1 )[0]
-    t_path = handler["path"]
-    path_vars = []
+def find_path_vars( path : str, handler : Handler ) -> Dict[ str, Any ]:
+  r_path = path.split( '?', 1 )[0]
+  t_path = handler["path"]
+  path_vars = []
 
-    left_start = 0
-    left_end = -1
-    left_str = None
-    right_start = 0
-    right_end = -1
-    right_str = None
-    key_start = 0
-    key_end = -1
+  left_start = 0
+  left_end = -1
+  left_str = None
+  right_start = 0
+  right_end = -1
+  right_str = None
+  key_start = 0
+  key_end = -1
+  key_str = None
+  value_start = -1
+  value_end = 0
+  value_str = None
+  value = None
+
+  left_end = t_path.find( "$$" )
+  if left_end >= 0:
+    left_str = t_path[left_start:left_end]
+    value_start = r_path.find( left_str ) + len( left_str )
+    value_end = -1
+  while 0 <= left_end and left_end < len( t_path ):
+    key_start = left_end + 2
+    key_end = t_path.find( "$$", key_start )
+    if key_end >= 0:
+      key_str = t_path[key_start:key_end]
+      right_start = key_end + 2
+      right_end = t_path.find( "$$", right_start )
+    if right_end >= 0:
+      right_str = t_path[right_start:right_end]
+      value_end = r_path.find( right_str, value_start )
+      left_start = right_start
+      left_end = right_end
+      left_str = right_str
+    if value_start >= 0 and value_end >= 0:
+      value_str = r_path[value_start:value_end]
+      try:
+        value = literal_eval( value_str )
+      except:
+        return None
+      value_start = value_end + len( right_str )
+    if key_str != None and value != None:
+      path_vars[key_str] = value
     key_str = None
-    value_start = -1
-    value_end = 0
-    value_str = None
     value = None
 
-    left_end = t_path.find( "$$" )
-    if left_end >= 0:
-      left_str = t_path[left_start:left_end]
-      value_start = r_path.find( left_str ) + len( left_str )
-      value_end = -1
-    while 0 <= left_end and left_end < len( t_path ):
-      key_start = left_end + 2
-      key_end = t_path.find( "$$", key_start )
-      if key_end >= 0:
-        key_str = t_path[key_start:key_end]
-        right_start = key_end + 2
-        right_end = t_path.find( "$$", right_start )
-      if right_end >= 0:
-        right_str = t_path[right_start:right_end]
-        value_end = r_path.find( right_str, value_start )
-        left_start = right_start
-        left_end = right_end
-        left_str = right_str
-      if value_start >= 0 and value_end >= 0:
-        value_str = r_path[value_start:value_end]
-        try:
-          value = literal_eval( value_str )
-        except:
-          return None
-        value_start = value_end + len( right_str )
-      if key_str != None and value != None:
-        path_vars[key_str] = value
-      key_str = None
-      value = None
-
-    return path_vars
+  return path_vars
 
 
 def server_startup( handler_map : HandlerNode ) -> None:
-  print( handler_map )
+
+  httpd = server.ThreadedHTTPServer()
 
 
 def startup( handlers_filename : str = None ) -> None:
   global handler_map
+
+  parser = argparse.ArgumentParser(description="Options for running the mock HTTP server")
+  parser.add_argument( "-t", "--threaded", action="store_true", help="Option for using a threaded HTTP server" )
+  parser.add_argument( "address", required=True, help="Address of the HTTP server to bind to" )
+  parser.add_argument( "port", default=80, help="Port of the HTTP server to bind to" )
+  parser.add_argument( "-s", "--ssl", nargs=2, metavars=("keyfile", "certfile"), type=str, help="Run server with SSL (port will not automatically default to 443, you will need to set it). A path to the key file and a path to the cert file will need to be set." )
+  args = parser.parse_args()
 
   if handlers_filename == None:
     handler_filenames = find_handler_files()
