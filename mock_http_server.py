@@ -1,10 +1,13 @@
 import http
-import http.server
+import http.server as server
+
+import ssl
 
 import urllib
 
 import os
 import os.path as path
+
 import argparse
 
 from ast           import literal_eval
@@ -182,18 +185,24 @@ def mime_type_map( mime_type_str : str ) -> Dict[ str, Tuple[ str, float ] ]:
   buckets = {}
   entries = mime_type_str.split( ',' )
 
+  mime_type_1 = None
+  mime_type_2 = None
+  attribute   = None
+
   for entry in entries:
     mime_type_1, entry = entry.split( '/', 1 )
+    mime_type_1 = mime_type_1.lstrip()
     if ';' in entry:
       mime_type_2, entry = entry.split( ';', 1 )
+      mime_type_2 = mime_type_2.rstrip()
       if '=' in entry:
         attribute_strs = entry.split( '=', 1 )
-        attribute = ( attribute_strs[0], literal_eval( attribute_strs[1] ) )
+        attribute = ( attribute_strs[0].strip(), literal_eval( attribute_strs[1].strip() ) )
       else:
-        attribute = entry
+        attribute = entry.strip()
     else:
-      mime_type_2 = entry
-      attribute = None
+      mime_type_2 = entry.rstrip()
+
     if not mime_type_1 in buckets:
       buckets[mime_type_1] = {}
     if not mime_type_2 in buckets[mime_type_1]:
@@ -237,16 +246,22 @@ def accept_headers_match( t_accept_header : str, r_accept_header : str ) -> bool
 
 def content_type_headers_match( t_ct_header : str, r_ct_header : str ) -> bool:
   t_mt_map = mime_type_map( t_ct_header )
+
+  r_mt1     = None
+  r_mt2     = None
+  attribute = None
   if '/' in r_ct_header:
     r_mt1, temp = r_ct_header.split( '/', 1 )
+    r_mt1 = r_mt1.lstrip()
     if ';' in temp:
       r_mt2, temp = temp.split( ';', 1 )
+      r_mt2 = r_mt2.rstrip()
       if '=' in temp:
-        attribute = temp.split( '=', 1 )
+        attribute = [ part.strip() for part in temp.split( '=', 1 ) ]
       else:
-        attribute = temp
+        attribute = temp.strip()
     else:
-      attribute = None
+      r_mt2 = temp.rstrip()
   else:
     return False
 
@@ -268,14 +283,15 @@ def content_type_headers_match( t_ct_header : str, r_ct_header : str ) -> bool:
 
   return True
 
+
 def match_headers( hander : Handler, request_headers : Message ) -> bool:
   for header in handler["headers"]:
     if header in headers:
-      if header.lower() == "accept":
-        if not accept_headers_match( handler["headers"], headers )
-          return False
-      elif header.lower() == "content-type":
-        if not content_type_headers_match( handler["headers"], headers )
+      #if header.lower() == "accept":
+      #  if not accept_headers_match( handler["headers"], headers )
+      #    return False
+      if header.lower() == "content-type":
+        if not content_type_headers_match( handler["headers"], headers ):
           return False
 
   return True
@@ -303,7 +319,7 @@ def find_handler_in_bucket( request_type : str, full_path : str, headers : Messa
     if matches:
       if "queries" in handler:
         matches = match_queries( handler, queries )
-      elif len( queries ) > 0
+      elif len( queries ) > 0:
         matches = False
     
     if matches:
@@ -359,6 +375,7 @@ def find_handler( request_type : str, path : str, queries : Queries,
 
   return find_handler_at_node( request_type, path, headers, client, queries, path_only, handler_map )
 
+
 def find_path_vars( path : str, handler : Handler ) -> Dict[ str, Any ]:
   r_path = path.split( '?', 1 )[0]
   t_path = handler["path"]
@@ -411,9 +428,30 @@ def find_path_vars( path : str, handler : Handler ) -> Dict[ str, Any ]:
   return path_vars
 
 
-def server_startup( handler_map : HandlerNode ) -> None:
+def server_startup( handler_map : HandlerNode, args : argparse.Namespace ) -> None:
+  valid_address = len( args.address ) > 0
+  valid_port = 0 < args.port and args.port < 65536
+  should_start_server = valid_address and valid_port
 
-  httpd = server.ThreadedHTTPServer()
+  use_ssl = isinstance( args.ssl, list ) and len( args.ssl ) == 2
+  if use_ssl and should_start_server:
+    keyfile_path = args.ssl[0]
+    certfile_path = args.ssl[1]
+    valid_keyfile = path.exists( keyfile_path ) and path.isfile( keyfile_path )
+    valid_certfile = path.exists( certfile_path ) and path.isfile( certfile_path )
+    should_start_server = valid_keyfile and valid_certfile
+
+  httpd = None
+  
+  if should_start_server:
+    server_create = server.ThreadedHTTPServer if args.threaded else server.HTTPServer
+    httpd = server_create( ( args.address, args.port ), DelegatingHTTPRequestHandler )
+
+  if should_start_server and httpd != None:
+    if use_ssl:
+      httpd.socket = ssl.wrap_socket( httpd.socket, keyfile=keyfile_path, certfile=certfile_path, server_side=True )
+
+    httpd.serve_forever()
 
 
 def startup( handlers_filename : str = None ) -> None:
@@ -421,9 +459,9 @@ def startup( handlers_filename : str = None ) -> None:
 
   parser = argparse.ArgumentParser(description="Options for running the mock HTTP server")
   parser.add_argument( "-t", "--threaded", action="store_true", help="Option for using a threaded HTTP server" )
-  parser.add_argument( "address", required=True, help="Address of the HTTP server to bind to" )
-  parser.add_argument( "port", default=80, help="Port of the HTTP server to bind to" )
-  parser.add_argument( "-s", "--ssl", nargs=2, metavars=("keyfile", "certfile"), type=str, help="Run server with SSL (port will not automatically default to 443, you will need to set it). A path to the key file and a path to the cert file will need to be set." )
+  parser.add_argument( "address", type=str, help="Address of the HTTP server to bind to" )
+  parser.add_argument( "port", nargs='?', default=80, type=int, help="Port of the HTTP server to bind to" )
+  parser.add_argument( "-s", "--ssl", nargs=2, metavar=("keyfile", "certfile"), type=str, help="Run server with SSL (port will not automatically default to 443, you will need to set it). A path to the key file and a path to the cert file will need to be set." )
   args = parser.parse_args()
 
   if handlers_filename == None:
@@ -433,7 +471,8 @@ def startup( handlers_filename : str = None ) -> None:
 
   handlers = load_handlers( handler_filenames )
   handler_map = map_handlers( handlers )
-  server_startup( handler_map )
+  if len( handler_map ) > 0:
+    server_startup( handler_map, args )
 
 
 if __name__ == "__main__":
