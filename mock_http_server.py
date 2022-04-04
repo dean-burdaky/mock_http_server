@@ -28,19 +28,22 @@ class DelegatingHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
     self.send_response( http.HTTPStatus.OK )
 
   def do_GET( self ):
-    queries = find_queries( self.path )
-    handler = find_handler( "GET", self.path, queries, self.headers, self.client_address )
-    path_vars = None
-    if handler != None:
-      path_vars = find_path_vars( self.path )
-      code, headers, content = hander["handle"]( self, self.client_address, queries, path_vars )
-      self.send_response( code )
-      for header_key in headers:
-        self.send_header( header_key, headers[header_key] )
-      self.end_headers()
-      self.wfile.write( content )
-    else:
-      self.send_error( http.HTTPStatus.NOT_FOUND, "Unable to find handler for request", "Unable to find handler which matches with the request in one or more of: Path, queries, headers and path variables." )
+    try:
+      queries = find_queries( self.path )
+      handler = find_handler( "GET", self.path, queries, self.headers, self.client_address )
+      path_vars = None
+      if handler != None:
+        path_vars = find_path_vars( self.path )
+        code, headers, content = handler["handle"]( self, self.client_address, queries, path_vars )
+        self.send_response( code )
+        for header_key in headers:
+          self.send_header( header_key, headers[header_key] )
+        self.end_headers()
+        self.wfile.write( content )
+      else:
+        self.send_error( http.HTTPStatus.NOT_FOUND, "Unable to find handler for request", "Unable to find handler which matches with the request in one or more of: Path, queries, headers and path variables" )
+    except BaseException as exception:
+      self.send_error( http.HTTPStatus.INTERNAL_SERVER_ERROR, "Exception caught that wasn't handled internally", "Exception {} caught that wasn't handled internally".format( repr( exception ) ) )
 
 
 def find_handler_files() -> List[ str ]:
@@ -55,7 +58,7 @@ def find_handler_files() -> List[ str ]:
   return handler_filenames
 
 
-def read_handers_file( handlers_filename : str ) -> List[ str ]:
+def read_handlers_file( handlers_filename : str ) -> List[ str ]:
   handler_filenames = []
   failed_line_reads = 0
   failed_file_read = True
@@ -284,20 +287,17 @@ def content_type_headers_match( t_ct_header : str, r_ct_header : str ) -> bool:
   return True
 
 
-def match_headers( hander : Handler, request_headers : Message ) -> bool:
+def match_headers( handler : Handler, request_headers : Message ) -> bool:
   for header in handler["headers"]:
-    if header in headers:
-      #if header.lower() == "accept":
-      #  if not accept_headers_match( handler["headers"], headers )
-      #    return False
+    if header in request_headers.keys():
       if header.lower() == "content-type":
-        if not content_type_headers_match( handler["headers"], headers ):
+        if not content_type_headers_match( handler["headers"], request_headers[header] ):
           return False
 
   return True
 
 
-def match_queries( hander : Handler, request_queries : Queries ) -> bool:
+def match_queries( handler : Handler, request_queries : Queries ) -> bool:
   if len( handler["queries"] ) == len( request_queries ):
     for param in handler["queries"]:
       if not param in request_queries or not isinstance( request_queries[param], handler["queries"][param] ):
@@ -342,11 +342,11 @@ def find_handler_at_node( request_type : str, full_path : str, headers : Message
 
     if child_key == node_str:
       if subpath == None or subpath == '':
-        bucket = parent[child_key]["~~node~~"]
+        bucket = parent[child_key]["~~node~~"] if "~~node~~" in parent[child_key] else None
         if bucket != None and isinstance( bucket, list ):
           handler = find_handler_in_bucket( request_type, full_path, headers, client, queries, bucket )
 
-        else:
+        elif "~~node~~" in parent[child_key]:
           problem = "'~~node~~' node at path {} is not a bucket/list".format( full_path )
 
       elif isinstance( parent[child_key], dict ):
@@ -363,6 +363,13 @@ def find_handler_at_node( request_type : str, full_path : str, headers : Message
     if problem != None:
       print( "Warning: {}".format( problem ) )
       break
+
+  if handler == None and problem == None:
+    for path_var_key in path_var_keys:
+      if isinstance( parent[path_var_key], dict ):
+        handler = find_handler_at_node( request_type, full_path, headers, client, queries, subpath, parent[path_var_key] )
+        if handler != None:
+          break
 
   return handler
 
