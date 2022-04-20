@@ -33,7 +33,7 @@ class DelegatingHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
       handler = find_handler( "GET", self.path, queries, self.headers, self.client_address )
       path_vars = None
       if handler != None:
-        path_vars = find_path_vars( self.path )
+        path_vars = find_path_vars( self.path, handler )
         code, headers, content = handler["handle"]( self, self.client_address, queries, path_vars )
         self.send_response( code )
         for header_key in headers:
@@ -291,8 +291,10 @@ def match_headers( handler : Handler, request_headers : Message ) -> bool:
   for header in handler["headers"]:
     if header in request_headers.keys():
       if header.lower() == "content-type":
-        if not content_type_headers_match( handler["headers"], request_headers[header] ):
+        if not content_type_headers_match( handler["headers"][header], request_headers[header] ):
           return False
+    else:
+      return False
 
   return True
 
@@ -385,8 +387,10 @@ def find_handler( request_type : str, path : str, queries : Queries,
 
 def find_path_vars( path : str, handler : Handler ) -> Dict[ str, Any ]:
   r_path = path.split( '?', 1 )[0]
+  r_path = r_path[:-1] if r_path.endswith( '/' ) else r_path
   t_path = handler["path"]
-  path_vars = []
+  t_path = t_path[:-1] if t_path.endswith( '/' ) else t_path
+  path_vars = {}
 
   left_start = 0
   left_end = -1
@@ -414,6 +418,8 @@ def find_path_vars( path : str, handler : Handler ) -> Dict[ str, Any ]:
       key_str = t_path[key_start:key_end]
       right_start = key_end + 2
       right_end = t_path.find( "$$", right_start )
+    if right_end < 0:
+      right_end = len( t_path )
     if right_end >= 0:
       right_str = t_path[right_start:right_end]
       value_end = r_path.find( right_str, value_start )
@@ -425,7 +431,7 @@ def find_path_vars( path : str, handler : Handler ) -> Dict[ str, Any ]:
       try:
         value = literal_eval( value_str )
       except:
-        return None
+        value = value_str
       value_start = value_end + len( right_str )
     if key_str != None and value != None:
       path_vars[key_str] = value
